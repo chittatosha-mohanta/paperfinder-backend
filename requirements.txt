@@ -3,3 +3,5 @@ flask-cors
 pymupdf
 pdfplumber
 gunicorn
+anthropic
+python-docx

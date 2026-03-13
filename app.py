@@ -1,12 +1,22 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import fitz  # PyMuPDF
-import pdfplumber
+import anthropic
+import os
+import base64
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import io
 import re
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import fitz
+import pdfplumber
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173", "http://localhost:5174", "https://paperfinder-pro.vercel.app"])
+CORS(app, origins=[
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "https://paperfinder-pro.vercel.app"
+])
 
 def clean_text(text):
     text = re.sub(r'[^\x20-\x7E\n]', ' ', text)
@@ -31,15 +41,11 @@ def extract_query(text):
         'november', 'december', 'email', 'doi', 'http', 'www', 'page', 'pages',
         'dongdong', 'shuhan', 'meizi', 'xiang', 'kemal', 'polat', 'normal'
     }
-
     words = text.split()
     keywords = [
         w for w in words
-        if len(w) > 4
-        and w.isalpha()
-        and w.lower() not in stop_words
+        if len(w) > 4 and w.isalpha() and w.lower() not in stop_words
     ]
-
     seen = set()
     unique_keywords = []
     for w in keywords:
@@ -49,7 +55,6 @@ def extract_query(text):
             unique_keywords.append(w)
         if len(unique_keywords) == 12:
             break
-
     return ' '.join(unique_keywords)
 
 def extract_with_pymupdf(pdf_bytes):
@@ -70,9 +75,11 @@ def extract_with_pdfplumber(pdf_bytes):
                 text += page_text + " "
     return clean_text(text)
 
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({"status": "ok", "message": "PaperFinder backend running"})
+
 
 @app.route('/extract-pdf', methods=['POST'])
 def extract_pdf():
@@ -113,6 +120,119 @@ def extract_pdf():
         print(f"pdfplumber failed: {e}")
 
     return jsonify({"error": "Could not extract text from this PDF."}), 422
+
+
+@app.route('/generate-paper', methods=['POST'])
+def generate_paper():
+    title = request.form.get('title', '')
+    abstract = request.form.get('abstract', '')
+    paper_format = request.form.get('format', 'IEEE')
+
+    # Extract text from reference PDFs
+    reference_texts = []
+    for key in request.files:
+        if key.startswith('reference_'):
+            file = request.files[key]
+            try:
+                pdf_bytes = file.read()
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                text = ""
+                for page in doc:
+                    text += page.get_text()
+                doc.close()
+                reference_texts.append(clean_text(text)[:3000])
+            except Exception as e:
+                print(f"Failed to read reference: {e}")
+
+    # Build references summary
+    refs_summary = ""
+    if reference_texts:
+        refs_summary = "\n\n".join([
+            f"Reference {i+1}:\n{t}"
+            for i, t in enumerate(reference_texts)
+        ])
+
+    # Build Claude prompt
+    prompt = f"""You are an expert academic paper writer. Write a complete, high-quality research paper in {paper_format} format.
+
+Paper Title: {title}
+
+Abstract provided by author:
+{abstract}
+
+Reference papers provided (use these for citations and context):
+{refs_summary if refs_summary else "No references provided - write based on title and abstract."}
+
+Instructions:
+1. Write a FULL research paper in {paper_format} format
+2. Include these sections: Abstract, Introduction, Related Work, Methodology, Results, Discussion, Conclusion, References
+3. Cite the reference papers properly using {paper_format} citation style like [1], [2] etc
+4. The paper should be detailed, professional, and academic in tone
+5. Add [DIAGRAM_HERE] placeholder where a diagram or figure should be inserted
+6. Make it at least 2000 words
+7. Format each section with the section name on its own line followed by the content
+
+Write the complete paper now:"""
+
+    try:
+        client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
+        message = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        paper_content = message.content[0].text
+    except Exception as e:
+        return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
+
+    # Generate Word document
+    try:
+        doc = Document()
+
+        title_para = doc.add_heading(title, 0)
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        fmt_para = doc.add_paragraph(f"Format: {paper_format}")
+        fmt_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+        doc.add_paragraph("")
+
+        sections = paper_content.split('\n')
+        section_keywords = [
+            'abstract', 'introduction', 'related work', 'methodology',
+            'results', 'discussion', 'conclusion', 'references'
+        ]
+
+        for line in sections:
+            line = line.strip()
+            if not line:
+                continue
+            is_heading = any(line.lower().startswith(kw) for kw in section_keywords)
+            if is_heading and len(line) < 60:
+                doc.add_heading(line, level=1)
+            elif '[DIAGRAM_HERE]' in line:
+                p = doc.add_paragraph()
+                p.add_run('[Figure: Insert diagram here]').bold = True
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            else:
+                doc.add_paragraph(line)
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        doc_bytes = buf.read()
+        doc_b64 = base64.b64encode(doc_bytes).decode('utf-8')
+
+        return jsonify({
+            "success": True,
+            "content": paper_content,
+            "docx_base64": doc_b64,
+            "filename": f"{title[:50].replace(' ', '_')}.docx"
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Document generation failed: {str(e)}"}), 500
+
 
 if __name__ == '__main__':
     app.run(debug=True, port=8080)
