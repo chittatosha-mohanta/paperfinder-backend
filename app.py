@@ -6,7 +6,7 @@ import io
 import re
 
 app = Flask(__name__)
-CORS(app, origins=["http://localhost:5173", "http://localhost:5174"])
+CORS(app, origins=["http://localhost:5173", "http://localhost:5174", "https://paperfinder-pro.vercel.app"])
 
 def clean_text(text):
     text = re.sub(r'[^\x20-\x7E\n]', ' ', text)
