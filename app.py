@@ -2,7 +2,7 @@ from groq import Groq
 import os
 import base64
 from docx import Document
-from docx.shared import Pt
+from docx.shared import Pt, Inches, Cm
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 import io
 import re
@@ -152,8 +152,63 @@ def generate_paper():
             for i, t in enumerate(reference_texts)
         ])
 
+    # Format-specific rules
+    format_rules = {
+        "IEEE": """IEEE FORMAT RULES:
+- Section headings: I. INTRODUCTION, II. RELATED WORK, III. METHODOLOGY, IV. RESULTS AND DISCUSSION, V. CONCLUSION
+- Abstract: single paragraph, no heading number, italic style
+- Keywords line after abstract: Index Terms—keyword1, keyword2, keyword3
+- Citations: [1], [2], [1], [3] style inline
+- References format: [1] A. Author, "Title of paper," Journal Name, vol. X, no. Y, pp. ZZ–ZZ, Month Year.
+- Use Roman numerals for section numbers
+- Subsections: A. Subsection Name, B. Subsection Name""",
+
+        "APA": """APA FORMAT RULES:
+- Title centered and bold on first page
+- Abstract on its own paragraph, labeled Abstract (bold)
+- Keywords: Keywords: word1, word2, word3
+- In-text citations: (Author, Year) or (Author et al., Year)
+- References section at end with hanging indent
+- Reference format: Author, A. A., & Author, B. B. (Year). Title of article. Journal Name, volume(issue), pages. https://doi.org/xxxxx
+- Section headings: centered and bold (Level 1), left-aligned bold (Level 2)""",
+
+        "ACM": """ACM FORMAT RULES:
+- Abstract followed by CCS Concepts and Keywords
+- Numbered sections: 1. INTRODUCTION, 2. RELATED WORK, etc.
+- Citations: [1], [2] style
+- References as numbered list
+- Reference format: [1] Author Name. Year. Title. In Proceedings of Conference (Location). Publisher, pages.
+- Include ACM Reference Format at end""",
+
+        "MLA": """MLA FORMAT RULES:
+- Header: Author Name, Professor, Course, Date (top left)
+- Title centered
+- In-text citations: (Author page) e.g. (Smith 45)
+- Works Cited at end
+- Reference format: Author Last, First. "Title." Journal, vol. X, no. Y, Year, pp. ZZ-ZZ.
+- Double-spaced paragraphs""",
+
+        "Nature": """Nature FORMAT RULES:
+- No numbered sections
+- Short abstract under 150 words
+- Introduction has no heading
+- Methods section at end before references
+- Citations as numbered superscripts: text¹, text²
+- References format: 1. Author, A. B. & Author, C. D. Title of article. Journal vol, pages (year).
+- Brief, high-impact writing style""",
+
+        "Springer": """Springer FORMAT RULES:
+- Numbered sections: 1 Introduction, 2 Related Work, 2.1 Subsection
+- Abstract followed by Keywords
+- Citations: [1], [2] style
+- References at end in numbered format
+- Reference format: 1. Author, A.B., Author, C.D.: Title of chapter. In: Editor, A., Editor, B. (eds.) Book Title, pp. ZZ–ZZ. Publisher, City (Year)"""
+    }
+
+    rules = format_rules.get(paper_format, format_rules["IEEE"])
+
     # Build prompt
-    prompt = f"""You are an expert academic paper writer. Write a complete, high-quality research paper in {paper_format} format.
+    prompt = f"""You are an expert academic paper writer. Write a complete, professional research paper strictly following {paper_format} journal format.
 
 Paper Title: {title}
 
@@ -163,23 +218,37 @@ Abstract provided by author:
 Reference papers provided (use these for citations and context):
 {refs_summary if refs_summary else "No references provided - write based on title and abstract."}
 
-Instructions:
-1. Write a FULL research paper in {paper_format} format
-2. Include these sections: Abstract, Introduction, Related Work, Methodology, Results, Discussion, Conclusion, References
-3. Cite the reference papers properly using {paper_format} citation style like [1], [2] etc
-4. The paper should be detailed, professional, and academic in tone
-5. Add [DIAGRAM_HERE] placeholder where a diagram or figure should be inserted
-6. Make it at least 2000 words
-7. Format each section with the section name on its own line followed by the content
+{rules}
 
-Write the complete paper now:"""
+PAPER STRUCTURE - Write ALL sections in order:
+1. Abstract (single paragraph, no citations)
+2. Keywords / Index Terms
+3. Introduction
+4. Related Work / Literature Review
+5. Methodology / Proposed Method
+6. Results and Discussion
+7. Conclusion
+8. References (properly formatted for {paper_format})
+
+CONTENT REQUIREMENTS:
+- Write minimum 2500 words of actual academic content
+- Every paragraph must be detailed, technical, and academic
+- Cite the provided reference papers as [1], [2] etc throughout
+- Add [DIAGRAM_HERE: brief description] where figures should be inserted
+- Methodology must be very detailed with any relevant equations
+- Results section must include comparison analysis
+- Write in third person academic tone only
+- No bullet points inside paper body paragraphs
+- Make the paper publishable quality
+
+Write the complete paper now starting with the title:"""
 
     # Call Groq API
     try:
         client = Groq(api_key=os.environ.get('GROQ_API_KEY'))
         message = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            max_tokens=4000,
+            max_tokens=6000,
             messages=[{"role": "user", "content": prompt}]
         )
         paper_content = message.choices[0].message.content
@@ -190,34 +259,106 @@ Write the complete paper now:"""
     try:
         doc = Document()
 
-        title_para = doc.add_heading(title, 0)
-        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        # Page margins
+        for section in doc.sections:
+            section.top_margin = Cm(2.5)
+            section.bottom_margin = Cm(2.5)
+            section.left_margin = Cm(2.5)
+            section.right_margin = Cm(2.5)
 
-        fmt_para = doc.add_paragraph(f"Format: {paper_format}")
+        # Title
+        title_para = doc.add_paragraph()
+        title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        title_run = title_para.add_run(title)
+        title_run.bold = True
+        title_run.font.size = Pt(16)
+
+        # Format label
+        fmt_para = doc.add_paragraph()
         fmt_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fmt_run = fmt_para.add_run(f"[{paper_format} Format]")
+        fmt_run.italic = True
+        fmt_run.font.size = Pt(10)
 
         doc.add_paragraph("")
 
-        sections = paper_content.split('\n')
+        # Section heading keywords
         section_keywords = [
-            'abstract', 'introduction', 'related work', 'methodology',
-            'results', 'discussion', 'conclusion', 'references'
+            'abstract', 'keywords', 'index terms',
+            'introduction', 'related work', 'literature review',
+            'methodology', 'proposed', 'method', 'approach',
+            'results', 'discussion', 'experiment',
+            'conclusion', 'future work', 'references',
+            'acknowledgment', 'appendix'
         ]
 
-        for line in sections:
+        lines = paper_content.split('\n')
+
+        for line in lines:
             line = line.strip()
             if not line:
                 continue
-            is_heading = any(line.lower().startswith(kw) for kw in section_keywords)
-            if is_heading and len(line) < 60:
-                doc.add_heading(line, level=1)
-            elif '[DIAGRAM_HERE]' in line:
-                p = doc.add_paragraph()
-                p.add_run('[Figure: Insert diagram here]').bold = True
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            else:
-                doc.add_paragraph(line)
 
+            # Clean markdown artifacts
+            line = re.sub(r'\*\*(.+?)\*\*', r'\1', line)
+            line = re.sub(r'\*(.+?)\*', r'\1', line)
+            line = re.sub(r'#{1,6}\s*', '', line)
+
+            # Check if it's a section heading
+            clean_check = re.sub(
+                r'^[IVXivx]+\.\s*|^\d+\.?\s*', '', line.lower()
+            ).strip().rstrip('.')
+
+            is_heading = (
+                any(clean_check.startswith(kw) for kw in section_keywords)
+                and len(line) < 80
+            )
+
+            if is_heading:
+                # Section heading
+                h = doc.add_heading('', level=1)
+                h.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                run = h.add_run(
+                    line.upper() if paper_format == "IEEE" else line
+                )
+                run.bold = True
+                run.font.size = Pt(12)
+
+            elif '[DIAGRAM_HERE' in line.upper() or '[FIGURE' in line.upper():
+                # Figure placeholder box
+                fig_para = doc.add_paragraph()
+                fig_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                fig_run = fig_para.add_run(f'[ Figure: {line} ]')
+                fig_run.bold = True
+                fig_run.italic = True
+                fig_run.font.size = Pt(9)
+
+            elif re.match(r'^\[\d+\]', line):
+                # Reference entry — hanging indent style
+                ref_para = doc.add_paragraph()
+                ref_para.paragraph_format.left_indent = Inches(0.4)
+                ref_para.paragraph_format.first_line_indent = Inches(-0.4)
+                ref_para.paragraph_format.space_after = Pt(3)
+                ref_run = ref_para.add_run(line)
+                ref_run.font.size = Pt(9)
+
+            elif line.lower().startswith('keywords') or line.lower().startswith('index terms'):
+                # Keywords line - italic
+                kw_para = doc.add_paragraph()
+                kw_run = kw_para.add_run(line)
+                kw_run.italic = True
+                kw_run.font.size = Pt(10)
+
+            else:
+                # Normal paragraph
+                para = doc.add_paragraph()
+                para.paragraph_format.first_line_indent = Inches(0.25)
+                para.paragraph_format.space_after = Pt(6)
+                para.paragraph_format.line_spacing = Pt(13)
+                run = para.add_run(line)
+                run.font.size = Pt(10)
+
+        # Save to bytes
         buf = io.BytesIO()
         doc.save(buf)
         buf.seek(0)
@@ -228,7 +369,7 @@ Write the complete paper now:"""
             "success": True,
             "content": paper_content,
             "docx_base64": doc_b64,
-            "filename": f"{title[:50].replace(' ', '_')}.docx"
+            "filename": f"{title[:50].replace(' ', '_')}_{paper_format}.docx"
         })
 
     except Exception as e:
