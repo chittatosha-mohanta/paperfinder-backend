@@ -1,4 +1,4 @@
-import anthropic
+from groq import Groq
 import os
 import base64
 from docx import Document
@@ -152,7 +152,7 @@ def generate_paper():
             for i, t in enumerate(reference_texts)
         ])
 
-    # Build Claude prompt
+    # Build prompt
     prompt = f"""You are an expert academic paper writer. Write a complete, high-quality research paper in {paper_format} format.
 
 Paper Title: {title}
@@ -174,14 +174,15 @@ Instructions:
 
 Write the complete paper now:"""
 
+    # Call Groq API
     try:
-        client = anthropic.Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY'))
-        message = client.messages.create(
-            model="claude-opus-4-5",
+        client = Groq(api_key=os.environ.get('GROQ_API_KEY'))
+        message = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             max_tokens=4000,
             messages=[{"role": "user", "content": prompt}]
         )
-        paper_content = message.content[0].text
+        paper_content = message.choices[0].message.content
     except Exception as e:
         return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
 
