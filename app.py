@@ -73,27 +73,47 @@ def extract_with_pdfplumber(pdf_bytes):
                 text += page_text + " "
     return clean_text(text)
 
+# ── Document helpers ──────────────────────────────────────────
+
+def set_run_font(run, size_pt, bold=False, italic=False, font_name='Times New Roman'):
+    """Apply consistent Times New Roman font to a run."""
+    run.font.name  = font_name
+    run.font.size  = Pt(size_pt)
+    run.bold       = bold
+    run.italic     = italic
+
 def set_two_columns(section):
+    """Apply two-column layout to a section."""
     sectPr = section._sectPr
     for existing in sectPr.findall(qn('w:cols')):
         sectPr.remove(existing)
     cols = OxmlElement('w:cols')
-    cols.set(qn('w:num'), '2')
-    cols.set(qn('w:space'), '720')
+    cols.set(qn('w:num'),        '2')
+    cols.set(qn('w:space'),      '720')   # 0.5 inch gap
     cols.set(qn('w:equalWidth'), '1')
     sectPr.append(cols)
 
 def insert_continuous_section_break(doc, two_col=True):
+    """
+    Insert a zero-height continuous section break to switch column layout
+    without adding visible whitespace.
+    """
     para = doc.add_paragraph()
-    pPr = para._p.get_or_add_pPr()
+    pf   = para.paragraph_format
+    pf.space_before = Pt(0)
+    pf.space_after  = Pt(0)
+    pf.line_spacing = Pt(1)
+
+    pPr    = para._p.get_or_add_pPr()
     sectPr = OxmlElement('w:sectPr')
     pgType = OxmlElement('w:type')
     pgType.set(qn('w:val'), 'continuous')
     sectPr.append(pgType)
+
     cols = OxmlElement('w:cols')
     if two_col:
-        cols.set(qn('w:num'), '2')
-        cols.set(qn('w:space'), '720')
+        cols.set(qn('w:num'),        '2')
+        cols.set(qn('w:space'),      '720')
         cols.set(qn('w:equalWidth'), '1')
     else:
         cols.set(qn('w:num'), '1')
@@ -101,24 +121,36 @@ def insert_continuous_section_break(doc, two_col=True):
     pPr.append(sectPr)
 
 def clean_line(line):
-    # Fix: properly escaped regex for bold/italic markdown removal
+    """Strip markdown formatting from a line."""
     line = re.sub(r'\*\*(.+?)\*\*', r'\1', line)
-    line = re.sub(r'\*(.+?)\*', r'\1', line)
-    line = re.sub(r'#{1,6}\s*', '', line)
+    line = re.sub(r'\*(.+?)\*',     r'\1', line)
+    line = re.sub(r'#{1,6}\s*',     '',    line)
     return line.strip()
 
-def is_ieee_section_heading(line):
-    """Detects IEEE-style headings: I. INTRODUCTION, II. RELATED WORK, etc."""
-    return bool(re.match(r'^[IVXivx]+\.\s+[A-Z\s]{3,}$', line.strip()))
+def is_ieee_main_heading(line):
+    """
+    Detects IEEE main section headings:
+      I. INTRODUCTION  /  II. RELATED WORK  /  REFERENCES  etc.
+    """
+    s = line.strip().upper()
+    if re.match(r'^[IVX]+\.\s+[A-Z][A-Z\s]+$', s):
+        return True
+    if s in ('REFERENCES', 'ACKNOWLEDGMENT', 'ACKNOWLEDGMENTS',
+             'DATA AVAILABILITY', 'CONFLICTS OF INTEREST'):
+        return True
+    return False
 
 def is_ieee_subsection_heading(line):
-    """Detects IEEE subsection: A. Name, B. Name"""
-    return bool(re.match(r'^[A-Z]\.\s+\w', line.strip())) and len(line) < 80
+    """Detects IEEE subsection headings: A. Name, B. Another Name"""
+    s = line.strip()
+    return bool(re.match(r'^[A-Z]\.\s+[A-Z][a-zA-Z]', s)) and len(s) < 80
 
-def is_generic_section_heading(line, keywords):
-    """Fallback heading detection for non-IEEE formats."""
-    clean = re.sub(r'^[IVXivx]+\.\s*|^\d+\.?\s*', '', line.lower()).strip().rstrip('.')
-    return any(clean.startswith(kw) for kw in keywords) and len(line) < 80
+def is_generic_heading(line, keywords):
+    """Fallback heading detector for non-IEEE formats."""
+    s     = line.strip()
+    lower = s.lower()
+    clean = re.sub(r'^[IVXivx]+\.\s*|^\d+[\.\s]+', '', lower).strip().rstrip('.')
+    return any(clean.startswith(kw) for kw in keywords) and len(s) < 90
 
 def is_reference_line(line):
     return bool(re.match(r'^\[\d+\]', line.strip()))
@@ -145,13 +177,15 @@ def extract_pdf():
     try:
         text = extract_with_pymupdf(pdf_bytes)
         if text and len(text.split()) > 15:
-            return jsonify({"success": True, "query": extract_query(text), "method": "pymupdf", "preview": text[:200]})
+            return jsonify({"success": True, "query": extract_query(text),
+                            "method": "pymupdf", "preview": text[:200]})
     except Exception as e:
         print(f"PyMuPDF failed: {e}")
     try:
         text = extract_with_pdfplumber(pdf_bytes)
         if text and len(text.split()) > 15:
-            return jsonify({"success": True, "query": extract_query(text), "method": "pdfplumber", "preview": text[:200]})
+            return jsonify({"success": True, "query": extract_query(text),
+                            "method": "pdfplumber", "preview": text[:200]})
     except Exception as e:
         print(f"pdfplumber failed: {e}")
     return jsonify({"error": "Could not extract text from this PDF."}), 422
@@ -166,12 +200,12 @@ def extract_pdf_full():
         return jsonify({"error": "File must be a PDF"}), 400
     pdf_bytes = file.read()
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        text = ""
-        for page in doc:
+        ref_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        text    = ""
+        for page in ref_doc:
             text += page.get_text() + "\n"
-        pages = len(doc)
-        doc.close()
+        pages = len(ref_doc)
+        ref_doc.close()
         text = clean_text(text)
         if not text or len(text.split()) < 10:
             raise Exception("Could not extract text from this PDF")
@@ -183,7 +217,7 @@ def extract_pdf_full():
 @app.route('/chat-pdf', methods=['POST'])
 def chat_pdf():
     question = request.form.get('question', '').strip()
-    pdf_text  = request.form.get('pdf_text', '').strip()
+    pdf_text  = request.form.get('pdf_text',  '').strip()
     if not question:
         return jsonify({"error": "No question provided"}), 400
     if not pdf_text:
@@ -226,14 +260,15 @@ def generate_paper():
     abstract     = request.form.get('abstract', '')
     paper_format = request.form.get('format', 'IEEE')
 
+    # Cap references at 5
     reference_texts = []
     for key in sorted(request.files.keys()):
         if key.startswith('reference_') and len(reference_texts) < 5:
             try:
                 pdf_bytes = request.files[key].read()
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                text = "".join(page.get_text() for page in doc)
-                doc.close()
+                ref_doc   = fitz.open(stream=pdf_bytes, filetype="pdf")
+                text      = "".join(page.get_text() for page in ref_doc)
+                ref_doc.close()
                 reference_texts.append(clean_text(text)[:3000])
             except Exception as e:
                 print(f"Failed to read reference: {e}")
@@ -245,255 +280,92 @@ def generate_paper():
     # ── Strict format rules ───────────────────────────────────
     format_rules = {
 
-        "IEEE": """STRICT IEEE JOURNAL FORMAT — FOLLOW EXACTLY AS SHOWN IN REAL IEEE PAPERS:
+        "IEEE": """STRICT IEEE JOURNAL FORMAT — FOLLOW EXACTLY:
 
-PAPER STRUCTURE (write every section in this exact order):
+OUTPUT STRUCTURE (write in this exact order):
 
-1. ABSTRACT
-- Start with exactly: Abstract—  (em dash immediately after the word, no space before it)
-- Single paragraph, 150-250 words, NO citations, NO sub-points, NO line breaks inside
-- Example: "Abstract—This paper presents a novel approach to..."
-
-2. INDEX TERMS
-- Immediately after abstract on its own line
-- Format exactly: Index Terms—keyword one, keyword two, keyword three, keyword four.
-
-3. SECTION I — INTRODUCTION
-- Heading format EXACTLY: I. INTRODUCTION  (Roman numeral, period, space, ALL CAPS)
-- Body: full academic paragraphs only — NEVER use bullet points anywhere in the paper body
-- Minimum 3 paragraphs covering: background, problem statement, contributions of this paper
-
-4. SECTION II — RELATED WORK
-- Heading EXACTLY: II. RELATED WORK
-- Cite references inline as [1], [2], [3] — use square brackets always
-- Discuss prior work in flowing prose paragraphs, no lists
-
-5. SECTION III — METHODOLOGY
-- Heading EXACTLY: III. METHODOLOGY
-- Subsections use format: A. Subsection Name  (letter, period, space, Title Case)
-- Include numbered equations where relevant: place (1), (2) at the right side
-- Example subsection heading: A. Data Preprocessing
-
-6. SECTION IV — RESULTS AND DISCUSSION
-- Heading EXACTLY: IV. RESULTS AND DISCUSSION
-- Reference figures as: Fig. 1, Fig. 2
-- Reference tables as: Table I, Table II
-- Add figure placeholders as: [DIAGRAM_HERE: detailed description of figure]
-- Compare your results with prior work using reference citations [1], [2]
-
-7. SECTION V — CONCLUSION
-- Heading EXACTLY: V. CONCLUSION
-- 2-3 paragraphs summarizing findings and future work
-- No new claims, no new citations
-
-8. REFERENCES
-- Heading EXACTLY: REFERENCES  (ALL CAPS, no Roman numeral)
-- Each reference on its own numbered line
-- Journal format: [1] A. B. Author and C. D. Author, "Title of paper," Journal Name, vol. X, no. Y, pp. ZZ–ZZ, Mon. Year.
-- Book format: [2] A. B. Author, Title of Book. City: Publisher, Year, pp. ZZ–ZZ.
-- Conference format: [3] A. B. Author, "Paper title," in Proc. Conf. Name, City, Year, pp. ZZ–ZZ.
-- Number references in order of first citation in the text
-
-MANDATORY STYLE RULES — NEVER VIOLATE THESE:
-✗ NEVER use bullet points or numbered lists anywhere in the body text
-✗ NEVER write "Introduction:" or "1. Introduction" — always use "I. INTRODUCTION"
-✗ NEVER write "Abstract:" — always "Abstract—" with em dash (—)
-✗ NEVER use markdown bold (**text**) or italic (*text*) or headers (## text)
-✓ ALL main section headings must be ALL CAPS with Roman numerals: I. II. III. IV. V.
-✓ Subsection headings: A. Name Of Subsection (title case, NOT all caps)
-✓ All in-text citations must use square brackets: [1], [2], [1]–[3]
-✓ Write minimum 2500 words total
-✓ Write in third person academic voice throughout
-✓ Every paragraph must be at least 3 full sentences""",
-
-        "APA": """STRICT APA 7th EDITION FORMAT — FOLLOW EXACTLY:
-
-PAPER STRUCTURE:
-
-1. ABSTRACT
-- Label: Abstract (bold, centered on its own line)
+━━━ ABSTRACT ━━━
+Start the very first line with exactly:
+Abstract—
+(the word Abstract followed IMMEDIATELY by an em dash —, then the text continues on the SAME LINE)
+Example: Abstract—This paper proposes a novel framework for deep learning...
 - Single paragraph, 150-250 words
-- Next line: Keywords: word1, word2, word3, word4
+- NO citations, NO bullet points, NO line breaks inside the paragraph
+- Do NOT write "Abstract:" or "Abstract -" — ONLY "Abstract—"
 
-2. INTRODUCTION (Level 1 heading — bold, centered, title case — NO number label)
-- At least 3 paragraphs of background and rationale
-- In-text citations: (Author, Year) or Author (Year) — NEVER [1] brackets
+━━━ INDEX TERMS ━━━
+Immediately after abstract, on its own line:
+Index Terms—term one, term two, term three, term four, term five.
 
-3. LITERATURE REVIEW (Level 1 heading)
-- Flowing prose paragraphs citing prior work: (Smith & Jones, 2020)
-
-4. METHODOLOGY (Level 1 heading)
-- Level 2 subheadings: left-aligned, bold, title case — e.g., Data Collection
-- Level 3 subheadings: indented, bold, italic, sentence case, ends with period.
-
-5. RESULTS (Level 1 heading)
-
-6. DISCUSSION (Level 1 heading)
-
-7. CONCLUSION (Level 1 heading)
-
-8. REFERENCES (Level 1 heading, bold, centered)
-- Hanging indent, alphabetical by first author last name
-- Journal: Author, A. B., & Author, C. D. (Year). Title in sentence case. Journal Name, volume(issue), pages. https://doi.org/xxxxx
-- Book: Author, A. B. (Year). Title in sentence case. Publisher.
-
-MANDATORY STYLE RULES:
-✗ NEVER use [1] bracket citations — always author-year: (Author, Year)
-✗ NEVER use bullet points in body text
-✓ All Level 1 headings: bold, centered, title case
-✓ Minimum 2500 words, third person academic voice""",
-
-        "ACM": """STRICT ACM FORMAT — FOLLOW EXACTLY:
-
-PAPER STRUCTURE:
-
-1. ABSTRACT
-- Label: ABSTRACT (all caps, bold)
-- 150 words maximum, single paragraph
-- Followed by: CCS CONCEPTS
-- Format: • Computing methodologies → Machine learning; • Applied computing → Economics;
-- Then: KEYWORDS (all caps)
-- Format: keyword1, keyword2, keyword3
-
-2. NUMBERED SECTIONS (ALL CAPS headings):
-1. INTRODUCTION
-2. RELATED WORK
-3. METHODOLOGY
-   3.1 Subsection Name
-   3.2 Another Subsection
-4. RESULTS
-5. DISCUSSION
-6. CONCLUSION
+━━━ SECTION HEADINGS ━━━
+Write ALL main section headings EXACTLY like this:
+I. INTRODUCTION
+II. RELATED WORK
+III. METHODOLOGY
+IV. RESULTS AND DISCUSSION
+V. CONCLUSION
 REFERENCES
+(Roman numeral + period + space + ALL CAPS text — no bold markers, no markdown symbols)
 
-- Section format: number. SECTION NAME  (number period space ALL CAPS)
-- Subsection format: number.number Subsection Name  (title case)
+━━━ SUBSECTION HEADINGS ━━━
+A. Subsection Name Here
+B. Another Subsection
+(Capital letter + period + space + Title Case — NOT all caps)
 
-CITATION STYLE:
-- Inline: [1], [2, 3], [4–6]  — always square brackets
-- References numbered in order of first appearance
+━━━ BODY TEXT RULES ━━━
+- Write in full academic paragraphs — NEVER use bullet points, dashes, or numbered lists in body
+- Every paragraph: minimum 4 sentences, formally written
+- In-text citations: [1], [2], [1]-[3] — always square brackets
+- Add figure placeholders as: [DIAGRAM_HERE: describe what this figure shows]
+- Equations go on their own line: equation_expression   (1)
 
-REFERENCE FORMAT:
-[1] Author, A. B., and Author, C. D. Year. Title of paper. In Proceedings of Conference Name (City, Country, Date), ACM, Pages. https://doi.org/xxx
-[2] Author, A. B. Year. Book Title. Publisher.
+━━━ REFERENCES ━━━
+Each reference on its own line:
+[1] A. B. Author and C. D. Author, "Title of paper," Journal Name, vol. X, no. Y, pp. ZZ-ZZ, Mon. Year.
+[2] A. B. Author, Title of Book. City: Publisher, Year.
+[3] A. B. Author, "Title," in Proc. Conf. Name, City, Year, pp. ZZ-ZZ.
 
-MANDATORY STYLE RULES:
-✗ NEVER use bullet points in body text — all prose paragraphs
-✓ Minimum 2500 words, technical academic voice""",
+ABSOLUTE RULES — NEVER BREAK:
+NO markdown: no **bold**, no *italic*, no ## headings anywhere
+NO bullet points or list items in body text
+NO "Abstract:" — only "Abstract—" with em dash
+NO "1. Introduction" style — only Roman numeral "I. INTRODUCTION"
+Minimum 2500 words total
+Third person academic voice throughout""",
 
-        "MLA": """STRICT MLA 9th EDITION FORMAT — FOLLOW EXACTLY:
+        "APA": """STRICT APA 7th EDITION FORMAT:
+Abstract label bold on own line, then paragraph. Keywords: word1, word2.
+Level 1 headings: bold, centered, title case. Level 2: bold, left, title case.
+In-text: (Author, Year) — NEVER [1]. References alphabetical, hanging indent.
+Journal: Author, A. B. (Year). Title. Journal, vol(issue), pages. https://doi.org/xxx
+Minimum 2500 words, no bullet points in body.""",
 
-PAPER STRUCTURE:
-- Header block top left (each on own line): Author Name / Course Name / Instructor / Date
-- Title: centered, title case, NOT bold, NOT underlined
-- No separate title page
+        "ACM": """STRICT ACM FORMAT:
+ABSTRACT label all caps. CCS CONCEPTS and KEYWORDS sections after abstract.
+Sections: 1. INTRODUCTION  2. RELATED WORK  3. METHODOLOGY  4. RESULTS  5. CONCLUSION
+Subsections: 3.1 Name  Citations: [1], [2]
+Ref: [1] Author, A. B. Year. Title. In Proceedings. ACM, pages.
+Minimum 2500 words, no bullet points in body.""",
 
-SECTION HEADINGS (centered, bold, title case, no numbers):
-Introduction
-Literature Review
-Methodology
-Results
-Discussion
-Conclusion
-Works Cited
+        "MLA": """STRICT MLA 9th EDITION FORMAT:
+Header block: Author / Course / Instructor / Date. Title centered.
+Headings: centered, bold, title case. In-text: (Author page).
+Works Cited alphabetical: Author Last, First. "Title." Journal, vol., no., Year, pp.
+Minimum 2500 words, no bullet points in body.""",
 
-CITATION STYLE:
-- In-text: (Author page#) — example: (Smith 45) or (Jones and Brown 102–103)
-- For no page number: (Author) — example: (Williams)
-- Never use [1] brackets
+        "Nature": """STRICT NATURE FORMAT:
+No abstract label — start paragraph directly, 150 words max.
+Sections not numbered: Introduction / Results / Discussion / Methods / References
+Superscript citations: word1 word2,3 — NOT [1]. 
+Ref: Author, A. B. et al. Title. Journal vol, pages (year).
+Minimum 2500 words, no bullet points in body.""",
 
-WORKS CITED FORMAT (at end, alphabetical):
-- Book: Author Last, First. Title of Book. Publisher, Year.
-- Article: Author Last, First. "Title of Article." Journal Name, vol. X, no. Y, Year, pp. ZZ–ZZ.
-- Web: Author Last, First. "Title of Page." Website Name, Day Mon. Year, URL.
-
-MANDATORY STYLE RULES:
-✗ NEVER use [1] citations — always (Author page)
-✗ NEVER use bullet points in body text
-✓ Present tense when discussing sources
-✓ Minimum 2500 words, formal academic voice""",
-
-        "Nature": """STRICT NATURE JOURNAL FORMAT — FOLLOW EXACTLY:
-
-PAPER STRUCTURE:
-
-1. ABSTRACT (no label — begin paragraph directly)
-- 150 words maximum
-- Single paragraph: background sentence, gap sentence, what you did, main finding, implication
-- No citations, no sub-headings inside abstract
-
-2. Introduction (heading — title case, not bold, not numbered)
-- 4-5 paragraphs establishing context and research gap
-- Superscript citations: evidence shows¹ or results agree²,³  — use superscript numbers NOT [1]
-
-3. Results (heading)
-- Present findings directly, no interpretation yet
-- Subheadings if needed: bold, sentence case, not numbered
-- Figure placeholders: [DIAGRAM_HERE: description of figure and what it shows]
-
-4. Discussion (heading)
-- Interpret results in context of literature
-- Address limitations honestly
-
-5. Methods (heading — placed here at end before references)
-- Detailed enough for reproducibility
-- Subheadings for each component: bold, sentence case
-
-6. Data Availability (heading)
-- One sentence statement
-
-7. References (heading)
-- Numbered in order of appearance in text
-- Format: Author, A. B., Author, C. D. & Author, E. F. Title of article in sentence case. Journal Abbrev. volume, start–end (year).
-- Example: Chen, Y. et al. Financial trading strategy system. Math. Probl. Eng. 2020, 1–13 (2020).
-
-MANDATORY STYLE RULES:
-✗ NEVER use [1] bracket citations — use superscript numbers¹
-✗ NEVER use bullet points in body text
-✗ NEVER number sections
-✓ Past tense for Methods and Results
-✓ Concise, precise scientific language
-✓ Minimum 2500 words""",
-
-        "Springer": """STRICT SPRINGER JOURNAL FORMAT — FOLLOW EXACTLY:
-
-PAPER STRUCTURE:
-
-1. Abstract
-- Label: Abstract (bold, on its own line)
-- 150-250 words, single paragraph
-- Next line: Keywords: word1 · word2 · word3  (use middle dot · as separator)
-
-2. NUMBERED SECTIONS (number space Title Case — NO period after number):
-1 Introduction
-2 Related Work
-  2.1 First Subtopic
-  2.2 Second Subtopic
-3 Methodology
-  3.1 Data Collection
-  3.2 Model Design
-4 Results
-5 Discussion
-6 Conclusion
-References
-
-- Main section: just the number and title — e.g.:  3 Methodology
-- Subsection: number.number and title — e.g.:  3.1 Data Collection
-- Sub-subsection: number.number.number — e.g.:  3.1.1 Feature Engineering
-
-CITATION STYLE:
-- Inline: [1], [2, 3], [4–6]  — square brackets, numbered in order of appearance
-
-REFERENCE FORMAT (numbered list, no brackets around number):
-1. Author, A.B., Author, C.D.: Title of paper. Journal Name 45(3), 123–145 (2020). https://doi.org/10.1000/xyz
-2. Author, A.B.: Book Title, pp. 45–67. Publisher, City (Year)
-3. Author, A.B., Author, C.D.: Paper title. In: Editor, A. (ed.) Conference Name, pp. 45–67. Springer, Heidelberg (2020)
-
-MANDATORY STYLE RULES:
-✗ NEVER use bullet points in body text — all flowing prose paragraphs
-✗ NEVER put a period after the section number: write "3 Methodology" NOT "3. Methodology"
-✓ Minimum 2500 words
-✓ Formal academic language, third person voice"""
+        "Springer": """STRICT SPRINGER FORMAT:
+Abstract bold label, then paragraph. Keywords: word1 · word2 · word3
+Sections: 1 Introduction  2 Related Work  (number space Title Case, no period)
+Subsections: 2.1 Name  Citations: [1], [2]
+Ref: 1. Author, A.B.: Title. Journal 45(3), 123-145 (2020).
+Minimum 2500 words, no bullet points in body."""
     }
 
     rules = format_rules.get(paper_format, format_rules["IEEE"])
@@ -505,28 +377,14 @@ Paper Title: {title}
 Abstract provided by author:
 {abstract}
 
-Reference papers to cite (extract key ideas and cite them):
+Reference papers to cite:
 {refs_summary}
 
 {rules}
 
-WRITE THE COMPLETE PAPER NOW IN THIS EXACT ORDER:
-1. Abstract
-2. Index Terms / Keywords
-3. All main sections (Introduction through Conclusion)
-4. References list
-
-GENERAL REQUIREMENTS (apply to all formats):
-- Minimum 2500 words total
-- Write detailed, flowing academic paragraphs — NEVER use bullet points in the body text
-- Cite the provided references throughout the paper using the correct citation style for {paper_format}
-- Insert figure placeholders [DIAGRAM_HERE: description] where relevant diagrams would appear
-- Use third person academic voice throughout
-- Methodology section must include relevant equations or mathematical formulations
-- Results section must include a comparison analysis referencing prior work
-- Do NOT include any markdown formatting symbols like **, *, or ##
-
-Begin writing the paper now:"""
+Start writing immediately with the Abstract. Do NOT write the title again. Do NOT add any preamble.
+Do NOT use any markdown formatting symbols (no **, no *, no ##).
+Write minimum 2500 words. All body text must be in flowing academic paragraphs with no bullet points."""
 
     try:
         client = Groq(api_key=os.environ.get('GROQ_API_KEY'))
@@ -539,76 +397,81 @@ Begin writing the paper now:"""
     except Exception as e:
         return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
 
-    # ── Build .docx ───────────────────────────────────────────
+    # ════════════════════════════════════════════════════════
+    # BUILD .docx
+    # ════════════════════════════════════════════════════════
     try:
         doc = Document()
 
+        # US Letter page, IEEE-standard margins
         for sec in doc.sections:
-            sec.top_margin    = Cm(2.5)
-            sec.bottom_margin = Cm(2.5)
-            sec.left_margin   = Cm(1.5)
-            sec.right_margin  = Cm(1.5)
+            sec.top_margin    = Cm(2.54)
+            sec.bottom_margin = Cm(2.54)
+            sec.left_margin   = Cm(1.91)
+            sec.right_margin  = Cm(1.91)
             sec.page_width    = Cm(21.59)
             sec.page_height   = Cm(27.94)
 
-        lines = paper_content.split('\n')
-
-        # ── Parse sections ────────────────────────────────────
+        # ── Parse AI output ───────────────────────────────────
+        lines          = paper_content.split('\n')
         abstract_lines = []
         keyword_lines  = []
         body_lines     = []
-        mode = 'before'
+        mode           = 'before'
 
         body_triggers = [
-            'introduction', 'related', 'i.', 'ii.', '1.', '2.',
-            '1 ', '2 ', 'methodology', 'results', 'conclusion'
+            'i. ', 'ii. ', 'iii. ', 'iv. ', 'v. ',
+            'introduction', 'related', 'methodology',
+            '1. ', '2. ', '1 ', '2 '
         ]
         body_headings = [
             'introduction', 'related work', 'literature review',
             'methodology', 'proposed', 'method', 'approach',
             'results', 'discussion', 'experiment', 'evaluation',
-            'conclusion', 'future work', 'references', 'acknowledgment',
+            'conclusion', 'future work', 'references',
+            'acknowledgment', 'acknowledgments',
             'data availability', 'conflicts of interest'
         ]
 
         for raw_line in lines:
-            s = raw_line.strip()
+            s     = raw_line.strip()
             if not s:
                 continue
-
             lower = s.lower()
-            # Strip Roman numerals and numbers for comparison
-            clean = re.sub(r'^[IVXivx]+\.\s*|^\d+\.?\s*', '', lower).strip().rstrip('.')
 
             # Detect abstract start
-            if re.match(r'^abstract[—\-:]*\s*', lower):
-                mode = 'abstract'
+            if re.match(r'^abstract[—\-:]*\s*', lower) and mode == 'before':
+                mode  = 'abstract'
                 after = re.sub(r'^abstract[—\-:]*\s*', '', s, flags=re.IGNORECASE).strip()
                 if after:
                     abstract_lines.append(after)
                 continue
 
-            # Detect keywords/index terms
-            if re.match(r'^(keywords?|index terms?)[—\-:]*', lower):
+            # Detect keywords / index terms
+            if re.match(r'^(index terms?|keywords?)[—\-:]*', lower):
                 mode = 'keywords'
                 keyword_lines.append(s)
                 continue
 
             if mode == 'abstract':
-                is_body_start = (
-                    any(clean.startswith(k) for k in body_triggers) and len(s) < 90
-                ) or is_ieee_section_heading(s)
-                if is_body_start:
+                is_body = (
+                    is_ieee_main_heading(s) or
+                    is_ieee_main_heading(s.upper()) or
+                    any(lower.startswith(t) for t in body_triggers) and len(s) < 90
+                )
+                if is_body:
                     mode = 'body'
                     body_lines.append(s)
                 else:
                     abstract_lines.append(s)
 
             elif mode == 'keywords':
-                is_body_start = (
-                    any(clean.startswith(k) for k in body_triggers) and len(s) < 90
-                ) or is_ieee_section_heading(s)
-                if is_body_start:
+                is_body = (
+                    is_ieee_main_heading(s) or
+                    is_ieee_main_heading(s.upper()) or
+                    any(lower.startswith(t) for t in body_triggers) and len(s) < 90
+                )
+                if is_body:
                     mode = 'body'
                     body_lines.append(s)
                 else:
@@ -617,50 +480,27 @@ Begin writing the paper now:"""
             elif mode == 'body':
                 body_lines.append(s)
 
-            else:
-                # 'before' mode — check if we should start abstract
-                if re.match(r'^abstract', lower):
-                    mode = 'abstract'
+        # ════════════════════════════════════════════════════
+        # WRITE DOCUMENT
+        # ════════════════════════════════════════════════════
 
-        # ── Write title ───────────────────────────────────────
+        # ── Title ─────────────────────────────────────────────
         tp = doc.add_paragraph()
         tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        tp.paragraph_format.space_after = Pt(6)
+        tp.paragraph_format.space_before = Pt(0)
+        tp.paragraph_format.space_after  = Pt(6)
         tr = tp.add_run(title)
-        tr.bold = True
-        tr.font.name = 'Times New Roman'
-        tr.font.size = Pt(16)
+        set_run_font(tr, size_pt=16, bold=True)
 
-        # Format badge
+        # ── Format badge ──────────────────────────────────────
         fp = doc.add_paragraph()
         fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        fp.paragraph_format.space_after = Pt(12)
+        fp.paragraph_format.space_before = Pt(0)
+        fp.paragraph_format.space_after  = Pt(10)
         fr = fp.add_run(f"[ {paper_format} Format ]")
-        fr.italic = True
-        fr.font.size = Pt(9)
-        fr.font.name = 'Times New Roman'
+        set_run_font(fr, size_pt=9, italic=True)
 
-        # ── Abstract heading ──────────────────────────────────
-        ah = doc.add_paragraph()
-        ah.alignment = WD_ALIGN_PARAGRAPH.LEFT
-        ah.paragraph_format.space_after = Pt(2)
-
-        if paper_format == "IEEE":
-            ahr = ah.add_run("Abstract")
-            ahr.bold = True
-            ahr.font.size = Pt(9)
-            ahr.font.name = 'Times New Roman'
-            ahr_dash = ah.add_run("—")
-            ahr_dash.bold = True
-            ahr_dash.font.size = Pt(9)
-            ahr_dash.font.name = 'Times New Roman'
-        else:
-            ahr = ah.add_run("Abstract")
-            ahr.bold = True
-            ahr.font.size = Pt(10)
-            ahr.font.name = 'Times New Roman'
-
-        # ── Abstract body ─────────────────────────────────────
+        # ── Abstract ──────────────────────────────────────────
         abs_text = ' '.join(abstract_lines).strip()
         abs_text = re.sub(r'^abstract[—\-:]*\s*', '', abs_text, flags=re.IGNORECASE).strip()
         abs_text = re.sub(r'\s+', ' ', abs_text)
@@ -668,120 +508,157 @@ Begin writing the paper now:"""
             abs_text = abstract
 
         if paper_format == "IEEE":
-            # Append abstract text to the same paragraph as "Abstract—"
-            apr = ah.add_run(abs_text)
-            apr.font.size = Pt(9)
-            apr.font.name = 'Times New Roman'
-            ah.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-            ah.paragraph_format.space_after = Pt(6)
+            # FIX 1: "Abstract—text" all on ONE paragraph, NOT italic
+            abs_para = doc.add_paragraph()
+            abs_para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            abs_para.paragraph_format.space_before = Pt(0)
+            abs_para.paragraph_format.space_after  = Pt(4)
+
+            r_label = abs_para.add_run("Abstract")
+            set_run_font(r_label, size_pt=9, bold=True)
+
+            r_dash  = abs_para.add_run("\u2014")   # em dash —
+            set_run_font(r_dash, size_pt=9, bold=True)
+
+            r_body  = abs_para.add_run(abs_text)
+            set_run_font(r_body, size_pt=9, bold=False, italic=False)  # NOT italic
+
         else:
-            ap = doc.add_paragraph()
+            ah  = doc.add_paragraph()
+            ah.alignment = WD_ALIGN_PARAGRAPH.LEFT
+            ah.paragraph_format.space_after = Pt(2)
+            ahr = ah.add_run("Abstract")
+            set_run_font(ahr, size_pt=10, bold=True)
+
+            ap  = doc.add_paragraph()
             ap.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
             ap.paragraph_format.space_after = Pt(6)
             apr = ap.add_run(abs_text)
-            apr.font.size = Pt(10)
-            apr.font.name = 'Times New Roman'
-            apr.italic = True
+            set_run_font(apr, size_pt=10, italic=True)
 
-        # ── Keywords / Index Terms ────────────────────────────
-        kw_text = ' '.join(keyword_lines).strip()
-        kw_text = re.sub(r'\s+', ' ', kw_text)
-        if kw_text:
+        # ── Index Terms / Keywords ────────────────────────────
+        # FIX 2: "Index Terms" bold, em dash, then terms NOT italic — on one para
+        kw_raw = ' '.join(keyword_lines).strip()
+        kw_raw = re.sub(r'\s+', ' ', kw_raw)
+
+        if kw_raw:
             kp = doc.add_paragraph()
             kp.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            kp.paragraph_format.space_after = Pt(10)
-            kpr = kp.add_run(kw_text)
-            kpr.italic = True
-            kpr.font.size = Pt(9)
-            kpr.font.name = 'Times New Roman'
+            kp.paragraph_format.space_before = Pt(0)
+            kp.paragraph_format.space_after  = Pt(10)
 
-        # ── Section break → two columns ───────────────────────
+            if paper_format == "IEEE":
+                terms = re.sub(r'^index terms?[—\-:]*\s*', '', kw_raw, flags=re.IGNORECASE).strip()
+                terms = re.sub(r'^keywords?[—\-:]*\s*',   '', terms,   flags=re.IGNORECASE).strip()
+
+                r_kl = kp.add_run("Index Terms")
+                set_run_font(r_kl, size_pt=9, bold=True)
+
+                r_kd = kp.add_run("\u2014")
+                set_run_font(r_kd, size_pt=9, bold=True)
+
+                r_kt = kp.add_run(terms)
+                set_run_font(r_kt, size_pt=9, italic=True)
+            else:
+                r_kw = kp.add_run(kw_raw)
+                set_run_font(r_kw, size_pt=9, italic=True)
+
+        # ── Section break → two-column body ──────────────────
+        # FIX 3: zero-height break paragraph — no visible gap
         insert_continuous_section_break(doc, two_col=True)
 
-        # ── Body lines ────────────────────────────────────────
+        # ── Body ──────────────────────────────────────────────
         for raw in body_lines:
             line = clean_line(raw)
             if not line:
                 continue
 
-            # IEEE main section heading: I. INTRODUCTION
-            if is_ieee_section_heading(line):
-                h = doc.add_paragraph()
+            # IEEE main heading: I. INTRODUCTION etc.
+            if is_ieee_main_heading(line) or is_ieee_main_heading(line.upper()):
+                # Normalise to proper IEEE heading format
+                normalised = re.sub(
+                    r'^([ivx]+)\.\s+(.+)',
+                    lambda m: m.group(1).upper() + '. ' + m.group(2).upper(),
+                    line, flags=re.IGNORECASE
+                )
+                if not re.match(r'^[IVX]+\.', normalised):
+                    normalised = line.upper()
+
+                h  = doc.add_paragraph()
                 h.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                h.paragraph_format.space_before = Pt(10)
-                h.paragraph_format.space_after  = Pt(4)
-                hr = h.add_run(line.upper())
-                hr.bold = True
-                hr.font.size = Pt(10)
-                hr.font.name = 'Times New Roman'
+                h.paragraph_format.space_before = Pt(8)
+                h.paragraph_format.space_after  = Pt(3)
+                hr = h.add_run(normalised)
+                set_run_font(hr, size_pt=10, bold=True)
 
             # IEEE subsection: A. Name
             elif paper_format == "IEEE" and is_ieee_subsection_heading(line):
-                h = doc.add_paragraph()
+                h  = doc.add_paragraph()
                 h.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                h.paragraph_format.space_before = Pt(6)
+                h.paragraph_format.space_before = Pt(5)
+                h.paragraph_format.space_after  = Pt(2)
+                hr = h.add_run(line)
+                set_run_font(hr, size_pt=10, bold=True, italic=True)
+
+            # Generic heading for non-IEEE formats
+            elif is_generic_heading(line, body_headings):
+                h  = doc.add_paragraph()
+                h.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                h.paragraph_format.space_before = Pt(8)
                 h.paragraph_format.space_after  = Pt(3)
                 hr = h.add_run(line)
-                hr.italic = True
-                hr.bold   = True
-                hr.font.size = Pt(10)
-                hr.font.name = 'Times New Roman'
-
-            # Generic heading for all other formats
-            elif is_generic_section_heading(line, body_headings):
-                h = doc.add_paragraph()
-                h.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                h.paragraph_format.space_before = Pt(10)
-                h.paragraph_format.space_after  = Pt(4)
-                # For IEEE force uppercase, others keep original
-                text_to_write = line.upper() if paper_format == "IEEE" else line
-                hr = h.add_run(text_to_write)
-                hr.bold = True
-                hr.font.size = Pt(10)
-                hr.font.name = 'Times New Roman'
+                set_run_font(hr, size_pt=10, bold=True)
 
             # Figure placeholder
             elif is_figure_placeholder(line):
                 fp2 = doc.add_paragraph()
                 fp2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                fp2.paragraph_format.space_before = Pt(8)
-                fp2.paragraph_format.space_after  = Pt(8)
-                fr2 = fp2.add_run(f'[ Figure: {line} ]')
-                fr2.bold = True
-                fr2.italic = True
-                fr2.font.size = Pt(8)
-                fr2.font.name = 'Times New Roman'
+                fp2.paragraph_format.space_before = Pt(6)
+                fp2.paragraph_format.space_after  = Pt(6)
+                fr2 = fp2.add_run(f"[ Figure: {line} ]")
+                set_run_font(fr2, size_pt=8, bold=True, italic=True)
 
             # Reference line [1] ...
             elif is_reference_line(line):
                 rp = doc.add_paragraph()
+                rp.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                # FIX 4: proper hanging indent for references
                 rp.paragraph_format.left_indent       = Inches(0.3)
                 rp.paragraph_format.first_line_indent = Inches(-0.3)
+                rp.paragraph_format.space_before      = Pt(0)
                 rp.paragraph_format.space_after       = Pt(2)
                 rr = rp.add_run(line)
-                rr.font.size = Pt(8)
-                rr.font.name = 'Times New Roman'
+                set_run_font(rr, size_pt=8)
 
-            # Keyword line appearing in body (sometimes model repeats them)
+            # Equation line — ends with (n)
+            elif re.search(r'\(\d+\)\s*$', line) and len(line) < 120:
+                ep = doc.add_paragraph()
+                ep.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                ep.paragraph_format.space_before = Pt(3)
+                ep.paragraph_format.space_after  = Pt(3)
+                er = ep.add_run(line)
+                set_run_font(er, size_pt=10, italic=True)
+
+            # Keywords repeated in body
             elif re.match(r'^(keywords?|index terms?)', line.lower()):
                 kp2 = doc.add_paragraph()
-                kp2.paragraph_format.space_after = Pt(6)
+                kp2.paragraph_format.space_after = Pt(4)
                 kr2 = kp2.add_run(line)
-                kr2.italic = True
-                kr2.font.size = Pt(9)
-                kr2.font.name = 'Times New Roman'
+                set_run_font(kr2, size_pt=9, italic=True)
 
             # Normal body paragraph
             else:
                 pp = doc.add_paragraph()
                 pp.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+                # FIX 5: proper IEEE body spacing
                 pp.paragraph_format.first_line_indent = Inches(0.2)
-                pp.paragraph_format.space_after       = Pt(4)
-                pp.paragraph_format.line_spacing      = Pt(11)
+                pp.paragraph_format.space_before      = Pt(0)
+                pp.paragraph_format.space_after       = Pt(3)
+                pp.paragraph_format.line_spacing      = Pt(12)
                 ppr = pp.add_run(line)
-                ppr.font.size = Pt(10)
-                ppr.font.name = 'Times New Roman'
+                set_run_font(ppr, size_pt=10)  # FIX 6: Times New Roman via set_run_font
 
+        # Apply two-column to last section
         set_two_columns(doc.sections[-1])
 
         buf = io.BytesIO()
@@ -790,10 +667,10 @@ Begin writing the paper now:"""
         doc_b64 = base64.b64encode(buf.read()).decode('utf-8')
 
         return jsonify({
-            "success":    True,
-            "content":    paper_content,
+            "success":     True,
+            "content":     paper_content,
             "docx_base64": doc_b64,
-            "filename":   f"{title[:50].replace(' ', '_')}_{paper_format}.docx"
+            "filename":    f"{title[:50].replace(' ', '_')}_{paper_format}.docx"
         })
 
     except Exception as e:
