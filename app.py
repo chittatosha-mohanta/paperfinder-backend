@@ -1,5 +1,6 @@
 from groq import Groq
 import os
+import json
 import base64
 from docx import Document
 from docx.shared import Pt, Inches, Cm
@@ -749,6 +750,82 @@ Minimum 2500 words. All body text in flowing academic paragraphs, no bullet poin
 
     except Exception as e:
         return jsonify({"error": f"Document generation failed: {str(e)}"}), 500
+
+
+@app.route('/clarify-search', methods=['POST'])
+def clarify_search():
+    data  = request.get_json(silent=True) or {}
+    query = data.get('query', '').strip()
+    if not query:
+        return jsonify({"error": "No query provided"}), 400
+
+    prompt = f"""You are a research paper search assistant. A user has typed this search query:
+
+"{query}"
+
+Your job is to:
+1. Extract the 4-6 most important academic keywords from this query
+2. Generate exactly 3 short clarifying questions with 3-4 answer options each
+   to help narrow down what research papers they actually need
+
+The questions should help distinguish:
+- The specific subtopic or angle they care about
+- The type of paper (implementation, survey, theoretical, etc.)
+- The domain or application area if ambiguous
+
+Respond ONLY with valid JSON in this exact format, nothing else:
+{{
+  "keywords": ["keyword1", "keyword2", "keyword3", "keyword4"],
+  "questions": [
+    {{
+      "question": "Question text here?",
+      "options": ["Option A", "Option B", "Option C", "Option D"]
+    }},
+    {{
+      "question": "Second question?",
+      "options": ["Option A", "Option B", "Option C"]
+    }},
+    {{
+      "question": "Third question?",
+      "options": ["Option A", "Option B", "Option C"]
+    }}
+  ]
+}}
+
+Examples of good questions for "women safety app":
+- "What aspect of safety are you focusing on?" → GPS tracking / SOS alerts / AI threat detection / Wearable devices
+- "What type of paper do you need?" → Implementation/system design / Survey/review / Algorithm/model / User study
+- "What platform or context?" → Mobile application / IoT/hardware / Social media analysis / General framework
+
+Now generate for the query: "{query}"
+Return ONLY the JSON, no explanation."""
+
+    try:
+        client   = Groq(api_key=os.environ.get('GROQ_API_KEY'))
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        raw = response.choices[0].message.content.strip()
+
+        # Strip markdown code fences if present
+        raw = re.sub(r'^```(?:json)?\s*', '', raw)
+        raw = re.sub(r'\s*```$',          '', raw)
+
+        parsed = json.loads(raw)
+
+        return jsonify({
+            "success":   True,
+            "keywords":  parsed.get("keywords",  []),
+            "questions": parsed.get("questions", []),
+        })
+
+    except json.JSONDecodeError:
+        # AI returned non-JSON — return empty so frontend falls back gracefully
+        return jsonify({"success": True, "keywords": [], "questions": []})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == '__main__':
