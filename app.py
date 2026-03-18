@@ -76,7 +76,7 @@ def extract_with_pdfplumber(pdf_bytes):
 # ── Document helpers ──────────────────────────────────────────
 
 def set_run_font(run, size_pt, bold=False, italic=False, font_name='Times New Roman'):
-    """Apply consistent Times New Roman font to a run."""
+    """Apply Times New Roman font to a run."""
     run.font.name  = font_name
     run.font.size  = Pt(size_pt)
     run.bold       = bold
@@ -89,14 +89,29 @@ def set_two_columns(section):
         sectPr.remove(existing)
     cols = OxmlElement('w:cols')
     cols.set(qn('w:num'),        '2')
-    cols.set(qn('w:space'),      '720')   # 0.5 inch gap
+    cols.set(qn('w:space'),      '720')
     cols.set(qn('w:equalWidth'), '1')
     sectPr.append(cols)
 
-def insert_continuous_section_break(doc, two_col=True):
+def set_single_column(section):
+    """Explicitly set single-column layout on a section."""
+    sectPr = section._sectPr
+    for existing in sectPr.findall(qn('w:cols')):
+        sectPr.remove(existing)
+    cols = OxmlElement('w:cols')
+    cols.set(qn('w:num'), '1')
+    sectPr.append(cols)
+
+def insert_section_break_single_to_double(doc):
     """
-    Insert a zero-height continuous section break to switch column layout
-    without adding visible whitespace.
+    FIX: Insert a continuous section break that marks the END of the
+    single-column header area. The sectPr inside this paragraph describes
+    the PREVIOUS section (header = 1 col). The last section (body) will
+    be set to 2 cols by set_two_columns().
+
+    Structure after this:
+      Section 0 (continuous, 1-col) = title, abstract, index terms
+      Section 1 (body, 2-col)       = all body paragraphs
     """
     para = doc.add_paragraph()
     pf   = para.paragraph_format
@@ -106,18 +121,17 @@ def insert_continuous_section_break(doc, two_col=True):
 
     pPr    = para._p.get_or_add_pPr()
     sectPr = OxmlElement('w:sectPr')
+
+    # This section break is continuous
     pgType = OxmlElement('w:type')
     pgType.set(qn('w:val'), 'continuous')
     sectPr.append(pgType)
 
+    # *** KEY FIX: cols num=1 means the HEADER section is single column ***
     cols = OxmlElement('w:cols')
-    if two_col:
-        cols.set(qn('w:num'),        '2')
-        cols.set(qn('w:space'),      '720')
-        cols.set(qn('w:equalWidth'), '1')
-    else:
-        cols.set(qn('w:num'), '1')
+    cols.set(qn('w:num'), '1')
     sectPr.append(cols)
+
     pPr.append(sectPr)
 
 def clean_line(line):
@@ -128,10 +142,7 @@ def clean_line(line):
     return line.strip()
 
 def is_ieee_main_heading(line):
-    """
-    Detects IEEE main section headings:
-      I. INTRODUCTION  /  II. RELATED WORK  /  REFERENCES  etc.
-    """
+    """Detect IEEE main headings: I. INTRODUCTION, II. RELATED WORK, REFERENCES, etc."""
     s = line.strip().upper()
     if re.match(r'^[IVX]+\.\s+[A-Z][A-Z\s]+$', s):
         return True
@@ -141,7 +152,7 @@ def is_ieee_main_heading(line):
     return False
 
 def is_ieee_subsection_heading(line):
-    """Detects IEEE subsection headings: A. Name, B. Another Name"""
+    """Detect IEEE subsection headings: A. Name, B. Another Name"""
     s = line.strip()
     return bool(re.match(r'^[A-Z]\.\s+[A-Z][a-zA-Z]', s)) and len(s) < 80
 
@@ -260,7 +271,7 @@ def generate_paper():
     abstract     = request.form.get('abstract', '')
     paper_format = request.form.get('format', 'IEEE')
 
-    # Cap references at 5
+    # ── Read reference PDFs (max 5) ───────────────────────────
     reference_texts = []
     for key in sorted(request.files.keys()):
         if key.startswith('reference_') and len(reference_texts) < 5:
@@ -273,11 +284,31 @@ def generate_paper():
             except Exception as e:
                 print(f"Failed to read reference: {e}")
 
+    # ── Read diagram images (max 10) ──────────────────────────
+    # FIX: diagrams were being uploaded but completely ignored before
+    diagram_images = []   # list of (filename, bytes, extension)
+    for key in sorted(request.files.keys()):
+        if key.startswith('diagram_') and len(diagram_images) < 10:
+            try:
+                file      = request.files[key]
+                img_bytes = file.read()
+                filename  = file.filename or key
+                ext       = filename.rsplit('.', 1)[-1].lower() if '.' in filename else 'png'
+                if ext not in ('png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff'):
+                    ext = 'png'
+                diagram_images.append((filename, img_bytes, ext))
+            except Exception as e:
+                print(f"Failed to read diagram: {e}")
+
     refs_summary = "\n\n".join(
         f"Reference {i+1}:\n{t}" for i, t in enumerate(reference_texts)
     ) if reference_texts else "No references provided."
 
-    # ── Strict format rules ───────────────────────────────────
+    diagram_note = ""
+    if diagram_images:
+        diagram_note = f"\n\nDIAGRAMS PROVIDED: The user has uploaded {len(diagram_images)} diagram image(s). Place [DIAGRAM_HERE: Fig. N - describe what this figure shows] at appropriate locations in the paper to indicate where each diagram should appear (Fig. 1, Fig. 2, etc.)."
+
+    # ── Format rules ──────────────────────────────────────────
     format_rules = {
 
         "IEEE": """STRICT IEEE JOURNAL FORMAT — FOLLOW EXACTLY:
@@ -287,90 +318,74 @@ OUTPUT STRUCTURE (write in this exact order):
 ━━━ ABSTRACT ━━━
 Start the very first line with exactly:
 Abstract—
-(the word Abstract followed IMMEDIATELY by an em dash —, then the text continues on the SAME LINE)
+(the word Abstract followed IMMEDIATELY by an em dash —, then the text on the SAME LINE)
 Example: Abstract—This paper proposes a novel framework for deep learning...
-- Single paragraph, 150-250 words
-- NO citations, NO bullet points, NO line breaks inside the paragraph
-- Do NOT write "Abstract:" or "Abstract -" — ONLY "Abstract—"
+- Single paragraph, 150-250 words, NO citations, NO bullet points
 
 ━━━ INDEX TERMS ━━━
-Immediately after abstract, on its own line:
-Index Terms—term one, term two, term three, term four, term five.
+Immediately after abstract on its own line:
+Index Terms—term one, term two, term three, term four.
 
 ━━━ SECTION HEADINGS ━━━
-Write ALL main section headings EXACTLY like this:
 I. INTRODUCTION
 II. RELATED WORK
 III. METHODOLOGY
 IV. RESULTS AND DISCUSSION
 V. CONCLUSION
 REFERENCES
-(Roman numeral + period + space + ALL CAPS text — no bold markers, no markdown symbols)
+(Roman numeral + period + space + ALL CAPS — no markdown)
 
 ━━━ SUBSECTION HEADINGS ━━━
-A. Subsection Name Here
+A. Subsection Name
 B. Another Subsection
-(Capital letter + period + space + Title Case — NOT all caps)
+(Letter + period + space + Title Case)
 
-━━━ BODY TEXT RULES ━━━
-- Write in full academic paragraphs — NEVER use bullet points, dashes, or numbered lists in body
-- Every paragraph: minimum 4 sentences, formally written
-- In-text citations: [1], [2], [1]-[3] — always square brackets
-- Add figure placeholders as: [DIAGRAM_HERE: describe what this figure shows]
-- Equations go on their own line: equation_expression   (1)
+━━━ BODY TEXT ━━━
+- Full academic paragraphs only — NEVER bullet points
+- In-text citations: [1], [2], [1]-[3]
+- Figure placeholders: [DIAGRAM_HERE: Fig. N description]
+- Equations on own line: expression   (1)
 
 ━━━ REFERENCES ━━━
-Each reference on its own line:
-[1] A. B. Author and C. D. Author, "Title of paper," Journal Name, vol. X, no. Y, pp. ZZ-ZZ, Mon. Year.
+[1] A. B. Author, "Title," Journal, vol. X, no. Y, pp. ZZ-ZZ, Year.
 [2] A. B. Author, Title of Book. City: Publisher, Year.
-[3] A. B. Author, "Title," in Proc. Conf. Name, City, Year, pp. ZZ-ZZ.
+[3] A. B. Author, "Title," in Proc. Conf., City, Year, pp. ZZ-ZZ.
 
-ABSOLUTE RULES — NEVER BREAK:
-NO markdown: no **bold**, no *italic*, no ## headings anywhere
-NO bullet points or list items in body text
-NO "Abstract:" — only "Abstract—" with em dash
-NO "1. Introduction" style — only Roman numeral "I. INTRODUCTION"
-Minimum 2500 words total
-Third person academic voice throughout""",
+RULES: No markdown, no bullets, no "Abstract:", minimum 2500 words, third person.""",
 
-        "APA": """STRICT APA 7th EDITION FORMAT:
-Abstract label bold on own line, then paragraph. Keywords: word1, word2.
-Level 1 headings: bold, centered, title case. Level 2: bold, left, title case.
-In-text: (Author, Year) — NEVER [1]. References alphabetical, hanging indent.
-Journal: Author, A. B. (Year). Title. Journal, vol(issue), pages. https://doi.org/xxx
-Minimum 2500 words, no bullet points in body.""",
+        "APA": """APA 7th Edition: Abstract bold label, Keywords: word1, word2.
+Level 1 headings bold centered title case. In-text: (Author, Year).
+References alphabetical hanging indent.
+Journal: Author, A. B. (Year). Title. Journal, vol(issue), pages.
+No bullets, 2500 words minimum.""",
 
-        "ACM": """STRICT ACM FORMAT:
-ABSTRACT label all caps. CCS CONCEPTS and KEYWORDS sections after abstract.
+        "ACM": """ACM Format: ABSTRACT all caps. CCS CONCEPTS and KEYWORDS after abstract.
 Sections: 1. INTRODUCTION  2. RELATED WORK  3. METHODOLOGY  4. RESULTS  5. CONCLUSION
-Subsections: 3.1 Name  Citations: [1], [2]
-Ref: [1] Author, A. B. Year. Title. In Proceedings. ACM, pages.
-Minimum 2500 words, no bullet points in body.""",
+Subsections: 3.1 Name. Citations: [1], [2].
+Ref: [1] Author. Year. Title. In Proceedings. ACM, pages.
+No bullets, 2500 words minimum.""",
 
-        "MLA": """STRICT MLA 9th EDITION FORMAT:
-Header block: Author / Course / Instructor / Date. Title centered.
-Headings: centered, bold, title case. In-text: (Author page).
-Works Cited alphabetical: Author Last, First. "Title." Journal, vol., no., Year, pp.
-Minimum 2500 words, no bullet points in body.""",
+        "MLA": """MLA 9th Edition: Header block Author/Course/Instructor/Date. Title centered.
+Headings centered bold title case. In-text: (Author page).
+Works Cited alphabetical: Author Last, First. "Title." Journal, vol., Year, pp.
+No bullets, 2500 words minimum.""",
 
-        "Nature": """STRICT NATURE FORMAT:
-No abstract label — start paragraph directly, 150 words max.
+        "Nature": """Nature Format: No abstract label, start paragraph directly, 150 words max.
 Sections not numbered: Introduction / Results / Discussion / Methods / References
-Superscript citations: word1 word2,3 — NOT [1]. 
+Superscript citations: word¹ — NOT [1].
 Ref: Author, A. B. et al. Title. Journal vol, pages (year).
-Minimum 2500 words, no bullet points in body.""",
+No bullets, 2500 words minimum.""",
 
-        "Springer": """STRICT SPRINGER FORMAT:
-Abstract bold label, then paragraph. Keywords: word1 · word2 · word3
-Sections: 1 Introduction  2 Related Work  (number space Title Case, no period)
-Subsections: 2.1 Name  Citations: [1], [2]
+        "Springer": """Springer Format: Abstract bold label, Keywords: word1 · word2 · word3
+Sections: 1 Introduction  2 Related Work (number space Title Case, no period)
+Subsections: 2.1 Name. Citations: [1], [2].
 Ref: 1. Author, A.B.: Title. Journal 45(3), 123-145 (2020).
-Minimum 2500 words, no bullet points in body."""
+No bullets, 2500 words minimum."""
     }
 
     rules = format_rules.get(paper_format, format_rules["IEEE"])
 
-    prompt = f"""You are an expert academic paper writer. Write a complete, professional, publication-ready research paper in {paper_format} format.
+    prompt = f"""You are an expert academic paper writer. Write a complete, professional research paper in {paper_format} format.
 
 Paper Title: {title}
 
@@ -378,13 +393,13 @@ Abstract provided by author:
 {abstract}
 
 Reference papers to cite:
-{refs_summary}
+{refs_summary}{diagram_note}
 
 {rules}
 
-Start writing immediately with the Abstract. Do NOT write the title again. Do NOT add any preamble.
-Do NOT use any markdown formatting symbols (no **, no *, no ##).
-Write minimum 2500 words. All body text must be in flowing academic paragraphs with no bullet points."""
+Start immediately with the Abstract. Do NOT write the title again. Do NOT add preamble.
+Do NOT use markdown symbols (no **, no *, no ##).
+Minimum 2500 words. All body text in flowing academic paragraphs, no bullet points."""
 
     try:
         client = Groq(api_key=os.environ.get('GROQ_API_KEY'))
@@ -403,7 +418,7 @@ Write minimum 2500 words. All body text must be in flowing academic paragraphs w
     try:
         doc = Document()
 
-        # US Letter page, IEEE-standard margins
+        # US Letter, IEEE margins
         for sec in doc.sections:
             sec.top_margin    = Cm(2.54)
             sec.bottom_margin = Cm(2.54)
@@ -439,7 +454,6 @@ Write minimum 2500 words. All body text must be in flowing academic paragraphs w
                 continue
             lower = s.lower()
 
-            # Detect abstract start
             if re.match(r'^abstract[—\-:]*\s*', lower) and mode == 'before':
                 mode  = 'abstract'
                 after = re.sub(r'^abstract[—\-:]*\s*', '', s, flags=re.IGNORECASE).strip()
@@ -447,7 +461,6 @@ Write minimum 2500 words. All body text must be in flowing academic paragraphs w
                     abstract_lines.append(after)
                 continue
 
-            # Detect keywords / index terms
             if re.match(r'^(index terms?|keywords?)[—\-:]*', lower):
                 mode = 'keywords'
                 keyword_lines.append(s)
@@ -457,7 +470,7 @@ Write minimum 2500 words. All body text must be in flowing academic paragraphs w
                 is_body = (
                     is_ieee_main_heading(s) or
                     is_ieee_main_heading(s.upper()) or
-                    any(lower.startswith(t) for t in body_triggers) and len(s) < 90
+                    (any(lower.startswith(t) for t in body_triggers) and len(s) < 90)
                 )
                 if is_body:
                     mode = 'body'
@@ -469,7 +482,7 @@ Write minimum 2500 words. All body text must be in flowing academic paragraphs w
                 is_body = (
                     is_ieee_main_heading(s) or
                     is_ieee_main_heading(s.upper()) or
-                    any(lower.startswith(t) for t in body_triggers) and len(s) < 90
+                    (any(lower.startswith(t) for t in body_triggers) and len(s) < 90)
                 )
                 if is_body:
                     mode = 'body'
@@ -481,10 +494,10 @@ Write minimum 2500 words. All body text must be in flowing academic paragraphs w
                 body_lines.append(s)
 
         # ════════════════════════════════════════════════════
-        # WRITE DOCUMENT
+        # WRITE DOCUMENT — single column header area first
         # ════════════════════════════════════════════════════
 
-        # ── Title ─────────────────────────────────────────────
+        # Title
         tp = doc.add_paragraph()
         tp.alignment = WD_ALIGN_PARAGRAPH.CENTER
         tp.paragraph_format.space_before = Pt(0)
@@ -492,15 +505,15 @@ Write minimum 2500 words. All body text must be in flowing academic paragraphs w
         tr = tp.add_run(title)
         set_run_font(tr, size_pt=16, bold=True)
 
-        # ── Format badge ──────────────────────────────────────
-        fp = doc.add_paragraph()
-        fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        fp.paragraph_format.space_before = Pt(0)
-        fp.paragraph_format.space_after  = Pt(10)
-        fr = fp.add_run(f"[ {paper_format} Format ]")
+        # Format badge
+        fp_para = doc.add_paragraph()
+        fp_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        fp_para.paragraph_format.space_before = Pt(0)
+        fp_para.paragraph_format.space_after  = Pt(10)
+        fr = fp_para.add_run(f"[ {paper_format} Format ]")
         set_run_font(fr, size_pt=9, italic=True)
 
-        # ── Abstract ──────────────────────────────────────────
+        # Abstract
         abs_text = ' '.join(abstract_lines).strip()
         abs_text = re.sub(r'^abstract[—\-:]*\s*', '', abs_text, flags=re.IGNORECASE).strip()
         abs_text = re.sub(r'\s+', ' ', abs_text)
@@ -508,74 +521,58 @@ Write minimum 2500 words. All body text must be in flowing academic paragraphs w
             abs_text = abstract
 
         if paper_format == "IEEE":
-            # FIX 1: "Abstract—text" all on ONE paragraph, NOT italic
+            # All on ONE paragraph: bold "Abstract—" + normal body text
             abs_para = doc.add_paragraph()
             abs_para.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
             abs_para.paragraph_format.space_before = Pt(0)
             abs_para.paragraph_format.space_after  = Pt(4)
-
             r_label = abs_para.add_run("Abstract")
             set_run_font(r_label, size_pt=9, bold=True)
-
-            r_dash  = abs_para.add_run("\u2014")   # em dash —
-            set_run_font(r_dash, size_pt=9, bold=True)
-
+            r_dash  = abs_para.add_run("\u2014")
+            set_run_font(r_dash,  size_pt=9, bold=True)
             r_body  = abs_para.add_run(abs_text)
-            set_run_font(r_body, size_pt=9, bold=False, italic=False)  # NOT italic
-
+            set_run_font(r_body,  size_pt=9, bold=False, italic=False)
         else:
-            ah  = doc.add_paragraph()
+            ah = doc.add_paragraph()
             ah.alignment = WD_ALIGN_PARAGRAPH.LEFT
             ah.paragraph_format.space_after = Pt(2)
-            ahr = ah.add_run("Abstract")
-            set_run_font(ahr, size_pt=10, bold=True)
-
-            ap  = doc.add_paragraph()
+            set_run_font(ah.add_run("Abstract"), size_pt=10, bold=True)
+            ap = doc.add_paragraph()
             ap.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
             ap.paragraph_format.space_after = Pt(6)
-            apr = ap.add_run(abs_text)
-            set_run_font(apr, size_pt=10, italic=True)
+            set_run_font(ap.add_run(abs_text), size_pt=10, italic=True)
 
-        # ── Index Terms / Keywords ────────────────────────────
-        # FIX 2: "Index Terms" bold, em dash, then terms NOT italic — on one para
+        # Index Terms / Keywords
         kw_raw = ' '.join(keyword_lines).strip()
         kw_raw = re.sub(r'\s+', ' ', kw_raw)
-
         if kw_raw:
             kp = doc.add_paragraph()
             kp.alignment = WD_ALIGN_PARAGRAPH.LEFT
             kp.paragraph_format.space_before = Pt(0)
             kp.paragraph_format.space_after  = Pt(10)
-
             if paper_format == "IEEE":
-                terms = re.sub(r'^index terms?[—\-:]*\s*', '', kw_raw, flags=re.IGNORECASE).strip()
-                terms = re.sub(r'^keywords?[—\-:]*\s*',   '', terms,   flags=re.IGNORECASE).strip()
-
-                r_kl = kp.add_run("Index Terms")
-                set_run_font(r_kl, size_pt=9, bold=True)
-
-                r_kd = kp.add_run("\u2014")
-                set_run_font(r_kd, size_pt=9, bold=True)
-
-                r_kt = kp.add_run(terms)
-                set_run_font(r_kt, size_pt=9, italic=True)
+                terms = re.sub(r'^(index terms?|keywords?)[—\-:]*\s*', '', kw_raw, flags=re.IGNORECASE).strip()
+                set_run_font(kp.add_run("Index Terms"), size_pt=9, bold=True)
+                set_run_font(kp.add_run("\u2014"),       size_pt=9, bold=True)
+                set_run_font(kp.add_run(terms),          size_pt=9, italic=True)
             else:
-                r_kw = kp.add_run(kw_raw)
-                set_run_font(r_kw, size_pt=9, italic=True)
+                set_run_font(kp.add_run(kw_raw), size_pt=9, italic=True)
 
-        # ── Section break → two-column body ──────────────────
-        # FIX 3: zero-height break paragraph — no visible gap
-        insert_continuous_section_break(doc, two_col=True)
+        # ── FIX: Section break — header=1 col, body will be 2 cols ──
+        insert_section_break_single_to_double(doc)
 
-        # ── Body ──────────────────────────────────────────────
+        # ════════════════════════════════════════════════════
+        # BODY — two column
+        # ════════════════════════════════════════════════════
+        diagram_index = 0   # track which uploaded diagram to embed next
+
         for raw in body_lines:
             line = clean_line(raw)
             if not line:
                 continue
 
-            # IEEE main heading: I. INTRODUCTION etc.
+            # IEEE main heading
             if is_ieee_main_heading(line) or is_ieee_main_heading(line.upper()):
-                # Normalise to proper IEEE heading format
                 normalised = re.sub(
                     r'^([ivx]+)\.\s+(.+)',
                     lambda m: m.group(1).upper() + '. ' + m.group(2).upper(),
@@ -583,82 +580,109 @@ Write minimum 2500 words. All body text must be in flowing academic paragraphs w
                 )
                 if not re.match(r'^[IVX]+\.', normalised):
                     normalised = line.upper()
-
-                h  = doc.add_paragraph()
+                h = doc.add_paragraph()
                 h.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 h.paragraph_format.space_before = Pt(8)
                 h.paragraph_format.space_after  = Pt(3)
-                hr = h.add_run(normalised)
-                set_run_font(hr, size_pt=10, bold=True)
+                set_run_font(h.add_run(normalised), size_pt=10, bold=True)
 
-            # IEEE subsection: A. Name
+            # IEEE subsection A. Name
             elif paper_format == "IEEE" and is_ieee_subsection_heading(line):
-                h  = doc.add_paragraph()
+                h = doc.add_paragraph()
                 h.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 h.paragraph_format.space_before = Pt(5)
                 h.paragraph_format.space_after  = Pt(2)
-                hr = h.add_run(line)
-                set_run_font(hr, size_pt=10, bold=True, italic=True)
+                set_run_font(h.add_run(line), size_pt=10, bold=True, italic=True)
 
-            # Generic heading for non-IEEE formats
+            # Generic heading for other formats
             elif is_generic_heading(line, body_headings):
-                h  = doc.add_paragraph()
+                h = doc.add_paragraph()
                 h.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 h.paragraph_format.space_before = Pt(8)
                 h.paragraph_format.space_after  = Pt(3)
-                hr = h.add_run(line)
-                set_run_font(hr, size_pt=10, bold=True)
+                set_run_font(h.add_run(line), size_pt=10, bold=True)
 
-            # Figure placeholder
+            # ── FIX: Figure placeholder — embed real diagram if available ──
             elif is_figure_placeholder(line):
-                fp2 = doc.add_paragraph()
-                fp2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                fp2.paragraph_format.space_before = Pt(6)
-                fp2.paragraph_format.space_after  = Pt(6)
-                fr2 = fp2.add_run(f"[ Figure: {line} ]")
-                set_run_font(fr2, size_pt=8, bold=True, italic=True)
+                if diagram_index < len(diagram_images):
+                    # Embed the actual uploaded image
+                    fname, img_bytes, ext = diagram_images[diagram_index]
+                    diagram_index += 1
+
+                    # Figure paragraph with the actual image
+                    fig_para = doc.add_paragraph()
+                    fig_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    fig_para.paragraph_format.space_before = Pt(8)
+                    fig_para.paragraph_format.space_after  = Pt(2)
+
+                    # Determine image type for docx
+                    from docx.shared import Inches as DocxInches
+                    img_stream = io.BytesIO(img_bytes)
+                    try:
+                        run_img = fig_para.add_run()
+                        run_img.add_picture(img_stream, width=Inches(3.0))
+                    except Exception as img_err:
+                        print(f"Could not embed image: {img_err}")
+                        # Fall back to placeholder text
+                        set_run_font(fig_para.add_run(f"[ Figure {diagram_index}: {fname} ]"),
+                                     size_pt=8, bold=True, italic=True)
+
+                    # Caption below image
+                    cap_para = doc.add_paragraph()
+                    cap_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    cap_para.paragraph_format.space_before = Pt(2)
+                    cap_para.paragraph_format.space_after  = Pt(8)
+                    # Extract description from [DIAGRAM_HERE: description]
+                    desc = re.sub(r'\[DIAGRAM_HERE[:\s]*', '', line, flags=re.IGNORECASE)
+                    desc = desc.rstrip(']').strip()
+                    caption_text = f"Fig. {diagram_index}. {desc}" if desc else f"Fig. {diagram_index}."
+                    set_run_font(cap_para.add_run(caption_text), size_pt=8, italic=True)
+
+                else:
+                    # No uploaded image for this placeholder — show placeholder box
+                    fp2 = doc.add_paragraph()
+                    fp2.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    fp2.paragraph_format.space_before = Pt(6)
+                    fp2.paragraph_format.space_after  = Pt(6)
+                    desc = re.sub(r'\[DIAGRAM_HERE[:\s]*', '', line, flags=re.IGNORECASE).rstrip(']').strip()
+                    placeholder_text = f"[ Figure: {desc} ]" if desc else "[ Figure: placeholder ]"
+                    set_run_font(fp2.add_run(placeholder_text), size_pt=8, bold=True, italic=True)
 
             # Reference line [1] ...
             elif is_reference_line(line):
                 rp = doc.add_paragraph()
                 rp.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                # FIX 4: proper hanging indent for references
                 rp.paragraph_format.left_indent       = Inches(0.3)
                 rp.paragraph_format.first_line_indent = Inches(-0.3)
                 rp.paragraph_format.space_before      = Pt(0)
                 rp.paragraph_format.space_after       = Pt(2)
-                rr = rp.add_run(line)
-                set_run_font(rr, size_pt=8)
+                set_run_font(rp.add_run(line), size_pt=8)
 
-            # Equation line — ends with (n)
+            # Equation line
             elif re.search(r'\(\d+\)\s*$', line) and len(line) < 120:
                 ep = doc.add_paragraph()
                 ep.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 ep.paragraph_format.space_before = Pt(3)
                 ep.paragraph_format.space_after  = Pt(3)
-                er = ep.add_run(line)
-                set_run_font(er, size_pt=10, italic=True)
+                set_run_font(ep.add_run(line), size_pt=10, italic=True)
 
             # Keywords repeated in body
             elif re.match(r'^(keywords?|index terms?)', line.lower()):
                 kp2 = doc.add_paragraph()
                 kp2.paragraph_format.space_after = Pt(4)
-                kr2 = kp2.add_run(line)
-                set_run_font(kr2, size_pt=9, italic=True)
+                set_run_font(kp2.add_run(line), size_pt=9, italic=True)
 
             # Normal body paragraph
             else:
                 pp = doc.add_paragraph()
                 pp.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-                # FIX 5: proper IEEE body spacing
                 pp.paragraph_format.first_line_indent = Inches(0.2)
                 pp.paragraph_format.space_before      = Pt(0)
                 pp.paragraph_format.space_after       = Pt(3)
                 pp.paragraph_format.line_spacing      = Pt(12)
-                ppr = pp.add_run(line)
-                set_run_font(ppr, size_pt=10)  # FIX 6: Times New Roman via set_run_font
+                set_run_font(pp.add_run(line), size_pt=10)
 
-        # Apply two-column to last section
+        # Apply two-column to the body section (last section)
         set_two_columns(doc.sections[-1])
 
         buf = io.BytesIO()
