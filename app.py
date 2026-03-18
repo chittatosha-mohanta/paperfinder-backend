@@ -104,10 +104,10 @@ def set_single_column(section):
 
 def insert_section_break_single_to_double(doc):
     """
-    FIX: Insert a continuous section break that marks the END of the
-    single-column header area. The sectPr inside this paragraph describes
-    the PREVIOUS section (header = 1 col). The last section (body) will
-    be set to 2 cols by set_two_columns().
+    Insert a continuous section break marking the END of the single-column
+    header area. The sectPr inside this paragraph describes Section 0
+    (header = 1 col, with explicit pgSz + pgMar so the first page renders
+    correctly in all Word versions and PDF export).
 
     Structure after this:
       Section 0 (continuous, 1-col) = title, abstract, index terms
@@ -122,15 +122,35 @@ def insert_section_break_single_to_double(doc):
     pPr    = para._p.get_or_add_pPr()
     sectPr = OxmlElement('w:sectPr')
 
-    # This section break is continuous
+    # Continuous break
     pgType = OxmlElement('w:type')
     pgType.set(qn('w:val'), 'continuous')
     sectPr.append(pgType)
 
-    # *** KEY FIX: cols num=1 means the HEADER section is single column ***
+    # Single column for the header area
     cols = OxmlElement('w:cols')
     cols.set(qn('w:num'), '1')
     sectPr.append(cols)
+
+    # FIX: Explicitly define page size (US Letter) for Section 0
+    # Without this, the first page has no defined dimensions and
+    # renders incorrectly in some Word versions and PDF exports
+    pgSz = OxmlElement('w:pgSz')
+    pgSz.set(qn('w:w'), '12240')   # 8.5 inches in twips
+    pgSz.set(qn('w:h'), '15840')   # 11 inches in twips
+    sectPr.append(pgSz)
+
+    # FIX: Explicitly define margins for Section 0
+    # top=1440 (1in), bottom=1440 (1in), left=1083 (~0.75in), right=1083 (~0.75in)
+    pgMar = OxmlElement('w:pgMar')
+    pgMar.set(qn('w:top'),    '1440')
+    pgMar.set(qn('w:right'),  '1083')
+    pgMar.set(qn('w:bottom'), '1440')
+    pgMar.set(qn('w:left'),   '1083')
+    pgMar.set(qn('w:header'), '720')
+    pgMar.set(qn('w:footer'), '720')
+    pgMar.set(qn('w:gutter'), '0')
+    sectPr.append(pgMar)
 
     pPr.append(sectPr)
 
@@ -505,13 +525,12 @@ Minimum 2500 words. All body text in flowing academic paragraphs, no bullet poin
         tr = tp.add_run(title)
         set_run_font(tr, size_pt=16, bold=True)
 
-        # Format badge
-        fp_para = doc.add_paragraph()
-        fp_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        fp_para.paragraph_format.space_before = Pt(0)
-        fp_para.paragraph_format.space_after  = Pt(10)
-        fr = fp_para.add_run(f"[ {paper_format} Format ]")
-        set_run_font(fr, size_pt=9, italic=True)
+        # Author / affiliation placeholder (IEEE style)
+        auth_para = doc.add_paragraph()
+        auth_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        auth_para.paragraph_format.space_before = Pt(4)
+        auth_para.paragraph_format.space_after  = Pt(10)
+        set_run_font(auth_para.add_run("Author Name — Institution Name"), size_pt=10)
 
         # Abstract
         abs_text = ' '.join(abstract_lines).strip()
