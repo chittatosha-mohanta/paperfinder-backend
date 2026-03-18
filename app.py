@@ -27,6 +27,37 @@ def clean_text(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
+def sanitize_text(text):
+    """
+    Replace common Unicode characters that break python-docx XML serialization
+    with safe ASCII equivalents. Also strips NULL bytes and control characters.
+    """
+    if not text:
+        return text
+    replacements = {
+        '\u2018': "'",   # left single quote
+        '\u2019': "'",   # right single quote / smart apostrophe
+        '\u201c': '"',   # left double quote
+        '\u201d': '"',   # right double quote
+        '\u2013': '-',   # en dash
+        '\u2014': '--',  # em dash (will be re-added as real em dash where needed)
+        '\u2026': '...',  # ellipsis
+        '\u00a0': ' ',   # non-breaking space
+        '\u00ad': '-',   # soft hyphen
+        '\u200b': '',    # zero-width space
+        '\u200c': '',    # zero-width non-joiner
+        '\u200d': '',    # zero-width joiner
+        '\ufeff': '',    # BOM
+        '\u2022': '-',   # bullet
+        '\u2012': '-',   # figure dash
+        '\u2015': '-',   # horizontal bar
+    }
+    for char, replacement in replacements.items():
+        text = text.replace(char, replacement)
+    # Strip NULL bytes and control characters (keep newline \n, tab \t)
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', text)
+    return text
+
 def extract_query(text):
     stop_words = {
         'the','and','for','with','from','this','that','are','was','were','has',
@@ -287,8 +318,8 @@ Answer:"""
 
 @app.route('/generate-paper', methods=['POST'])
 def generate_paper():
-    title        = request.form.get('title', '')
-    abstract     = request.form.get('abstract', '')
+    title        = sanitize_text(request.form.get('title', ''))
+    abstract     = sanitize_text(request.form.get('abstract', ''))
     paper_format = request.form.get('format', 'IEEE')
 
     # ── Read reference PDFs (max 5) ───────────────────────────
@@ -428,7 +459,7 @@ Minimum 2500 words. All body text in flowing academic paragraphs, no bullet poin
             max_tokens=6000,
             messages=[{"role": "user", "content": prompt}]
         )
-        paper_content = response.choices[0].message.content
+        paper_content = sanitize_text(response.choices[0].message.content)
     except Exception as e:
         return jsonify({"error": f"AI generation failed: {str(e)}"}), 500
 
